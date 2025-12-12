@@ -19,3 +19,6 @@
 - Bibliotecas:
   ```bash
   pip install pandas matplotlib
+
+# Vídeo de explicação do projeto:
+https://drive.google.com/file/d/1H7Q8o_XzQrUjTMzWIORcDIM8DmMTZg3v/view?usp=drive_link
