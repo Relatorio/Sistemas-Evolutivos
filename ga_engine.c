@@ -18,8 +18,8 @@ double* GENE_MAX_VALUE = NULL;
 FILE* ga_csv_file = NULL;
 
 // --- PARÂMETROS BIOLÓGICOS E ADAPTATIVOS ---
-#define MUTATION_PROB_INITIAL 2.0   // Começa com 5% de chance de mutar
-#define MUTATION_PROB_MAX 20.0      // Se chegar a 25%, ativa REPULSÃO
+#define MUTATION_PROB_INITIAL 5.0   // Começa com 5% de chance de mutar
+#define MUTATION_PROB_MAX 25.0      // Se chegar a 25%, ativa REPULSÃO
 #define MUTATION_PROB_MIN 0.1       // Mínimo para refinamento fino
 
 // Severidade: Quando a mutação ocorre, o gene muda em até 15% do seu range total
@@ -27,6 +27,7 @@ FILE* ga_csv_file = NULL;
 
 // Controle de Estagnação
 #define STAGNATION_LIMIT 20           // Gerações sem melhora para aumentar a mutação
+#define CONVERGENCE_BUFFER 10          // Gerações sustentadas de melhora para reduzir a mutação
 #define GENETIC_DIVERSITY_THRESHOLD 1.5 // Se diversidade < isso, estamos convergindo
 #define REPULSION_BASE_FACTOR 0.5     // Força da repulsão
 #define RESET_AFTER_REPULSION_GENS 20 // Tempo tolerado em modo repulsão antes do Reset
@@ -108,10 +109,11 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
     initialize_population();
     
     // Variáveis de Estado
-    double mutation_prob = MUTATION_PROB_INITIAL; // Agora é Probabilidade (%)
+    double mutation_prob = MUTATION_PROB_INITIAL; // Probabilidade (%)
     double baseline_mutation = MUTATION_PROB_INITIAL;
     
     int stagnation_counter = 0;
+    int convergence_counter = 0; // Buffer para redução suave
     int repulsion_mode_counter = 0;
     int crossover_mode = MODE_ATTRACTION;
     int post_reset_cnt = 0; // Contador de proteção pós-reset
@@ -128,7 +130,7 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
         double max_fit = -1e300;
         int best_idx = 0;
         int valid = 0;
-        char event_str[30] = "-"; // String para logar eventos (Reset, Repulsão)
+        char event_str[30] = "-"; // String para logar eventos
 
         // ---------------------------------------------------------
         // 1. AVALIAÇÃO DA POPULAÇÃO
@@ -160,9 +162,8 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
         Individual curr_best = clone_individual(&population[best_idx]);
         int improved = 0;
         if (prev_best.genes && max_fit > -1e200) {
-             // Reavalia o anterior para garantir consistência
              double prev_f = fitness_func(prev_best, extra_param);
-             // Considera melhora se fitness aumentou E genes mudaram
+             // Considera melhora se fitness aumentou E genes mudaram significativamente
              if (max_fit > prev_f + 1e-9 && !are_individuals_equal(curr_best, prev_best)) improved = 1;
         } else if (max_fit > -1e200) improved = 1;
 
@@ -171,7 +172,7 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
         // ---------------------------------------------------------
         
         if (post_reset_cnt > 0) {
-            // Proteção Pós-Reset: Mantém mutação alta por um tempo para misturar genes
+            // Proteção Pós-Reset: Alta mutação para misturar genes
             post_reset_cnt--; 
             mutation_prob = baseline_mutation * 2.0; 
             crossover_mode = MODE_ATTRACTION;
@@ -183,22 +184,27 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
                 repulsion_mode_counter = 0; 
                 crossover_mode = MODE_ATTRACTION;
                 
-                // Controle pela Dispersão:
-                // Se estamos convergindo (diversidade baixa) E melhorando,
-                // reduzimos a mutação para "escalar o pico" com precisão.
+                // Controle pela Dispersão com Buffer
                 if (calculate_genetic_diversity() < GENETIC_DIVERSITY_THRESHOLD) {
-                    mutation_prob /= 2.0;
+                    convergence_counter++; // Acumula consistência
+                    
+                    if (convergence_counter >= CONVERGENCE_BUFFER) {
+                        mutation_prob /= 1.5; // Redução suave 
+                        convergence_counter = 0; // Reseta buffer
+                    }
                 } else {
                     mutation_prob = baseline_mutation; // Mantém ritmo normal
+                    convergence_counter = 0;
                 }
 
             } else {
                 // FRACASSO: Algoritmo travou
+                convergence_counter = 0; // Perdeu a consistência da convergência
                 stagnation_counter++;
                 
                 if (stagnation_counter >= STAGNATION_LIMIT) {
-                    // Começa a aumentar a chance de mutação para sair do buraco
-                    mutation_prob *= 2.0; 
+                    // Começa a aumentar a chance de mutação
+                    mutation_prob *= 1.5; 
                     
                     // Se a chance de mutação bateu no teto (25%) -> Ativa REPULSÃO
                     if (mutation_prob >= MUTATION_PROB_MAX) {
@@ -212,13 +218,10 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
                             strcpy(event_str, "RESET-HIBRIDO");
                             
                             int reset_cnt = (int)(POPULATION_SIZE * RESET_PERCENTAGE); // 50%
-                            int survivor_count = POPULATION_SIZE - reset_cnt; // Os 50% melhores
+                            int survivor_count = POPULATION_SIZE - reset_cnt; 
                             int current_fill_idx = survivor_count; 
 
-                            // --- CRIAÇÃO DOS INDIVÍDUOS ESPECIAIS ---
-
-                            // 1. O FRANKENSTEIN
-                            // Pega pedaços aleatórios dos sobreviventes
+                            // --- 1. O FRANKENSTEIN ---
                             if (current_fill_idx < POPULATION_SIZE) {
                                 for (int d = 0; d < NUM_DIMENSIONS; d++) {
                                     int random_parent = rand() % survivor_count; 
@@ -228,11 +231,10 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
                                 current_fill_idx++; 
                             }
                             
-                            // 2. O EDA (Estimation of Distribution Algorithm)
-                            // Calcula a tendência estatística da elite
+                            // --- 2. O EDA (Estimation of Distribution) ---
                             if (current_fill_idx < POPULATION_SIZE) {
                                 for (int d = 0; d < NUM_DIMENSIONS; d++) {
-                                    // Calcula média e desvio padrão dos SOBREVIVENTES
+                                    // Estatísticas da Elite
                                     double sum = 0.0, sum_sq = 0.0;
                                     for(int k = 0; k < survivor_count; k++) {
                                         double val = population[k].genes[d];
@@ -242,7 +244,7 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
                                     double variance = (sum_sq / survivor_count) - (mean * mean);
                                     double std_dev = (variance > 0) ? sqrt(variance) : 0.0;
                                     
-                                    // Gera gene via Box-Muller (Gaussiana)
+                                    // Box-Muller (Gaussiana)
                                     double u1 = ((double)rand() / RAND_MAX);
                                     double u2 = ((double)rand() / RAND_MAX);
                                     if(u1 < 1e-9) u1 = 1e-9;
@@ -259,8 +261,7 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
                                 current_fill_idx++;
                             }
 
-                            // 3. ALEATÓRIOS PUROS
-                            // Preenche o resto das vagas
+                            // --- 3. ALEATÓRIOS PUROS ---
                             for(int k = current_fill_idx; k < POPULATION_SIZE; k++) {
                                 for(int d = 0; d < NUM_DIMENSIONS; d++) 
                                     population[k].genes[d] = GENE_MIN_VALUE[d] + ((double)rand()/RAND_MAX)*(GENE_MAX_VALUE[d]-GENE_MIN_VALUE[d]);
@@ -325,13 +326,10 @@ Individual run_ga_cycle(double (*fitness_func)(Individual, const void*), const v
                 new_pop[i].genes[j] = base_gene;
 
                 // B. MUTAÇÃO BIOLÓGICA (Probabilística)
-                // Rola o dado de 0 a 100
                 double chance_roll = (double)rand() / RAND_MAX * 100.0;
                 
-                // Se o dado cair DENTRO da chance de mutação...
                 if (chance_roll < mutation_prob) {
-                    // ... A MUTAÇÃO OCORRE!
-                    // Calcula severidade (15% do range)
+                    // A MUTAÇÃO OCORRE
                     double range = GENE_MAX_VALUE[j] - GENE_MIN_VALUE[j];
                     double change = ((double)rand()/RAND_MAX - 0.5) * (range * MUTATION_SEVERITY / 100.0);
                     new_pop[i].genes[j] += change;
